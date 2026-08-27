@@ -5,8 +5,8 @@
 #   so the guest's own OOM killer handles memory pressure; the host container
 #   never touches Render's 512 MB limit.
 # wasmtime v33.0.2 is c2w v0.8.4's pinned runtime (v48+ Cranelift can't compile
-# the module). Invocation matches c2w's own tests (no `run` subcommand, --dir= form).
+# the module). out.cwasm is precompiled by CI; --allow-precompiled skips runtime JIT,
+# cutting the compile peak from ~522 MB to ~375 MB so 256 MB guest RAM fits Render's 512 MB.
 # The guest takes ~10-12s to boot under Bochs; the prompt appears after that.
-# -O opt-level=1 caps the JIT compile peak at ~386 MB (default opt-level=2 peaks at 522 MB -> OOM on Render's 512 MB limit).
 # Known c2w cosmetic issue #567: commands echo twice; run `stty -echo` if it bothers you.
-exec wasmtime -O opt-level=1 --dir=/root::/mnt/host /app/out.wasm /bin/bash
+exec wasmtime --allow-precompiled --dir=/root::/mnt/host /app/out.cwasm /bin/bash

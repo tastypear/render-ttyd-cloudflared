@@ -29,14 +29,16 @@ RUN wget -qO /tmp/wt.tar.xz \
     && chmod +x /usr/local/bin/wasmtime \
     && rm -rf /tmp/wt.tar.xz /tmp/wasmtime-v*
 
-# out.wasm from the CI-produced release. Retries because the release may not exist
-# on the very first deploy (before the build-wasm workflow finishes).
+# out.cwasm (precompiled by CI) from the release. Running the precompiled module
+# skips runtime JIT, eliminating the ~522 MB JIT compile peak (precompiled peak
+# ~375 MB, so 256 MB guest RAM + cloudflared fits Render's 512 MB limit).
+# Retries because the release may not exist on the very first deploy.
 RUN set -x; for i in $(seq 1 20); do \
-      wget -qO /app/out.wasm \
-        "https://github.com/tastypear/render-ttyd-cloudflared/releases/download/${WASM_RELEASE_TAG}/out.wasm" \
-        && test -s /app/out.wasm && break; \
+      wget -qO /app/out.cwasm \
+        "https://github.com/tastypear/render-ttyd-cloudflared/releases/download/${WASM_RELEASE_TAG}/out.cwasm" \
+        && test -s /app/out.cwasm && break; \
       echo "wasm release not ready (attempt $i); retrying in 30s..."; sleep 30; \
-    done; test -s /app/out.wasm
+    done; test -s /app/out.cwasm
 
 COPY guest-shell.sh /app/guest-shell.sh
 COPY start.sh /start.sh
