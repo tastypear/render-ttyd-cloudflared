@@ -29,6 +29,15 @@ RUN wget -qO /tmp/wt.tar.xz \
     && chmod +x /usr/local/bin/wasmtime \
     && rm -rf /tmp/wt.tar.xz /tmp/wasmtime-v*
 
+# c2w-net: host-side user-space network stack for the guest (gvisor-tap-vsock).
+# Runs in the background; wasmtime connects to it via -S tcplisten.
+RUN wget -qO /tmp/c2w.tar.gz \
+        "https://github.com/container2wasm/container2wasm/releases/download/v0.8.4/container2wasm-v0.8.4-linux-amd64.tar.gz" \
+    && tar xzf /tmp/c2w.tar.gz -C /tmp c2w-net \
+    && mv /tmp/c2w-net /usr/local/bin/c2w-net \
+    && chmod +x /usr/local/bin/c2w-net \
+    && rm -f /tmp/c2w.tar.gz
+
 # out.wasm from the CI-produced release. Retries because the release may not exist
 # on the very first deploy (before the build-wasm workflow finishes).
 RUN set -x; for i in $(seq 1 20); do \
