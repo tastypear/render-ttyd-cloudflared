@@ -17,6 +17,19 @@ if [ -n "$TTYD_USER" ] && [ -n "$TTYD_PASS" ]; then
     AUTH_ARGS=(-c "${TTYD_USER}:${TTYD_PASS}")
 fi
 
+# One-shot boot diagnostic (background, logs to stdout -> Render logs).
+# opt-level=1 keeps the JIT peak at ~386 MB so this won't OOM the container.
+# stdin held open 120s for Render's slow Bochs boot (c2w #566 workaround).
+(
+  set +e
+  echo "[selftest] starting wasmtime boot probe (opt-level=1)..."
+  s=$(date +%s)
+  { echo 'echo GUEST_BOOT_OK'; echo 'grep MemTotal /proc/meminfo'; echo 'exit'; sleep 120; } \
+    | timeout 200 wasmtime -O opt-level=1 --dir=/root::/mnt/host /app/out.wasm /bin/sh 2>&1 \
+    | while IFS= read -r l; do echo "[selftest] $l"; done
+  echo "[selftest] probe finished, elapsed=$(($(date +%s)-s))s"
+) &
+
 # ttyd becomes PID 1 and binds $PORT (keeps Render's health check happy).
 # Each webshell connection runs guest-shell.sh, which boots a fresh c2w guest
 # (debian:bookworm-slim, RAM capped at build time via VM_MEMORY_SIZE_MB).
