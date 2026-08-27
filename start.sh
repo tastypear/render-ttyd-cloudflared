@@ -22,6 +22,8 @@ fi
 # stdin held open 120s for Render's slow Bochs boot (c2w #566 workaround).
 (
   set +e
+  sleep 25  # let cloudflared finish tunnel setup before we measure/add load
+  echo "[selftest] baseline RSS of all procs: $(ps -eo rss= | awk '{s+=$1} END {print s/1024" MB"}')"
   echo "[selftest] starting wasmtime boot probe (opt-level=1)..."
   s=$(date +%s)
   { echo 'echo GUEST_BOOT_OK'; echo 'grep MemTotal /proc/meminfo'; echo 'exit'; sleep 120; } \
