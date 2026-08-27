@@ -35,7 +35,13 @@ jobs:
 
       - name: Build out.wasm (debian:bookworm-slim, guest RAM capped at 256 MB)
         run: |
-          ./c2w --build-arg VM_MEMORY_SIZE_MB=256 debian:bookworm-slim out.wasm
+          # SOURCE_REPO override: c2w v0.8.4's embedded Dockerfile points at
+          # ktock/container2wasm, which has no v0.8.4 tag. The tag lives on the
+          # org repo container2wasm/container2wasm.
+          ./c2w \
+            --build-arg VM_MEMORY_SIZE_MB=256 \
+            --build-arg SOURCE_REPO=https://github.com/container2wasm/container2wasm \
+            debian:bookworm-slim out.wasm
           ls -lh out.wasm
 
       - name: Publish to rolling release "wasm-build"
