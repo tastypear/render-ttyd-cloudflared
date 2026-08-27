@@ -542,7 +542,14 @@ FROM gcc-x86-64-linux-gnu-base AS grub-amd64-dev
 ARG LINUX_LOGLEVEL
 RUN apt-get update && apt-get install -y mkisofs xorriso wget bison flex python-is-python3 gettext
 WORKDIR /work/
-RUN wget https://ftp.gnu.org/gnu/grub/grub-2.06.tar.gz
+RUN for url in \
+      "https://mirrors.ocf.berkeley.edu/gnu/grub/grub-2.06.tar.gz" \
+      "https://mirrors.kernel.org/gnu/grub/grub-2.06.tar.gz" \
+      "https://ftpmirror.gnu.org/gnu/grub/grub-2.06.tar.gz" \
+      "https://ftp.gnu.org/gnu/grub/grub-2.06.tar.gz"; do \
+      wget -q --timeout=30 "$url" && break; \
+      echo "grub download from $url failed; trying next..."; \
+    done && test -s grub-2.06.tar.gz
 RUN tar zxvf grub-2.06.tar.gz
 WORKDIR /work/grub-2.06
 RUN ./configure --target=i386
