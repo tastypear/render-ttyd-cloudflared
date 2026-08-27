@@ -29,16 +29,22 @@ RUN wget -qO /tmp/wt.tar.xz \
     && chmod +x /usr/local/bin/wasmtime \
     && rm -rf /tmp/wt.tar.xz /tmp/wasmtime-v*
 
-# out.cwasm (precompiled by CI) from the release. Running the precompiled module
-# skips runtime JIT, eliminating the ~522 MB JIT compile peak (precompiled peak
-# ~375 MB, so 256 MB guest RAM + cloudflared fits Render's 512 MB limit).
-# Retries because the release may not exist on the very first deploy.
+# out.wasm from the CI-produced release. Retries because the release may not exist
+# on the very first deploy (before the build-wasm workflow finishes).
 RUN set -x; for i in $(seq 1 20); do \
-      wget -qO /app/out.cwasm \
-        "https://github.com/tastypear/render-ttyd-cloudflared/releases/download/${WASM_RELEASE_TAG}/out.cwasm" \
-        && test -s /app/out.cwasm && break; \
+      wget -qO /app/out.wasm \
+        "https://github.com/tastypear/render-ttyd-cloudflared/releases/download/${WASM_RELEASE_TAG}/out.wasm" \
+        && test -s /app/out.wasm && break; \
       echo "wasm release not ready (attempt $i); retrying in 30s..."; sleep 30; \
-    done; test -s /app/out.cwasm
+    done; test -s /app/out.wasm
+
+# Precompile out.wasm -> out.cwasm during the Render build (build instances have ample
+# RAM for the ~522 MB JIT peak; the 512 MB hard limit only applies at runtime).
+# -C cranelift-has_avx512f=false: disable AVX-512 so the precompiled module runs on any
+# x86_64 CPU (Render's build and runtime may be different CPU generations).
+# At runtime, --allow-precompiled skips JIT entirely (peak ~375 MB, fits 512 MB limit).
+RUN wasmtime compile -O opt-level=2 -C cranelift-has_avx512f=false /app/out.wasm -o /app/out.cwasm \
+    && rm /app/out.wasm && test -s /app/out.cwasm
 
 COPY guest-shell.sh /app/guest-shell.sh
 COPY start.sh /start.sh

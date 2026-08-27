@@ -52,19 +52,11 @@ jobs:
           test -s out.wasm
           ls -lh out.wasm
 
-      - name: Precompile out.wasm -> out.cwasm (eliminates runtime JIT peak)
-        run: |
-          curl -sL -o /tmp/wt.tar.xz \
-            "https://github.com/bytecodealliance/wasmtime/releases/download/v33.0.2/wasmtime-v33.0.2-x86_64-linux.tar.xz"
-          tar xf /tmp/wt.tar.xz -C /tmp
-          /tmp/wasmtime-v33.0.2-x86_64-linux/wasmtime compile -O opt-level=2 out.wasm -o out.cwasm
-          ls -lh out.cwasm
-
       - name: Publish to rolling release "wasm-build"
         run: |
           gh release delete wasm-build --cleanup-tag -y || true
-          gh release create wasm-build out.wasm out.cwasm \
+          gh release create wasm-build out.wasm \
             --target "$GITHUB_SHA" --title "wasm build" \
-            --notes "Auto build: debian:bookworm-slim, VM_MEMORY_SIZE_MB=256, precompiled, from $GITHUB_SHA"
+            --notes "Auto build: debian:bookworm-slim, VM_MEMORY_SIZE_MB=256, from $GITHUB_SHA"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
