@@ -33,16 +33,18 @@ jobs:
           tar xzf c2w.tar.gz
           ./c2w --version
 
-      - name: Build out.wasm (debian:bookworm-slim, guest RAM capped at 256 MB)
+      - name: Build out.wasm (debian:bookworm-slim, guest RAM capped at 128 MB)
         run: |
           # c2w.Dockerfile = c2w's embedded Dockerfile with busybox.net -> buildroot mirror
           # (busybox.net SSL is currently broken). SOURCE_REPO override: c2w v0.8.4 points at
           # ktock/container2wasm which has no v0.8.4 tag; the tag is on the org repo.
           # Retry to absorb transient network blips; buildx cache reuses completed layers.
+          # VM_MEMORY_SIZE_MB=128: with 256 the wasmtime steady-state (~395 MB) + cloudflared
+          # OOMs Render's 512 MB limit. 128 -> steady ~267 MB, peak ~394 MB, fits.
           for i in 1 2 3; do
             if ./c2w \
               --dockerfile c2w.Dockerfile \
-              --build-arg VM_MEMORY_SIZE_MB=256 \
+              --build-arg VM_MEMORY_SIZE_MB=128 \
               --build-arg SOURCE_REPO=https://github.com/container2wasm/container2wasm \
               debian:bookworm-slim out.wasm; then
               break
