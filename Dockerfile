@@ -40,10 +40,12 @@ RUN set -x; for i in $(seq 1 20); do \
 
 # Precompile out.wasm -> out.cwasm during the Render build (build instances have ample
 # RAM for the ~522 MB JIT peak; the 512 MB hard limit only applies at runtime).
-# -C cranelift-has_avx512f=false: disable AVX-512 so the precompiled module runs on any
-# x86_64 CPU (Render's build and runtime may be different CPU generations).
+# --target x86_64-unknown-linux-gnu: compile for baseline x86_64 with NO CPU-specific
+# features (no AVX-512, no AVX2, etc.), so the precompiled module loads on any x86_64
+# host regardless of what features the build server's CPU has.
 # At runtime, --allow-precompiled skips JIT entirely (peak ~375 MB, fits 512 MB limit).
-RUN wasmtime compile -O opt-level=2 -C cranelift-has_avx512f=false /app/out.wasm -o /app/out.cwasm \
+RUN echo "Build CPU flags:" && grep -m1 ^flags /proc/cpuinfo \
+    && wasmtime compile --target x86_64-unknown-linux-gnu -O opt-level=2 /app/out.wasm -o /app/out.cwasm \
     && rm /app/out.wasm && test -s /app/out.cwasm
 
 COPY guest-shell.sh /app/guest-shell.sh
