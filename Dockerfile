@@ -2,7 +2,7 @@ FROM debian:bookworm-slim
 
 ARG CLOUDFLARED_VERSION=2026.8.2
 ARG TTYD_VERSION=1.7.8
-ARG WASMTIME_VERSION=48.0.1
+ARG WASMTIME_VERSION=33.0.2
 # out.wasm is produced by .github/workflows/build-wasm.yml and published to this release tag.
 ARG WASM_RELEASE_TAG=wasm-build
 

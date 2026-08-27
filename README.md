@@ -30,12 +30,14 @@ browser -> cloudflared tunnel -> ttyd (host, PID 1) -> wasmtime -> c2w guest (de
 
 ## Verify the memory cap
 
-Open the web terminal (via your Cloudflare tunnel URL). You are now inside the **guest** (debian, 256 MB RAM).
+Open the web terminal (via your Cloudflare tunnel URL). **Wait ~10-12 seconds** for the Bochs-emulated guest to boot — the prompt appears after that. You are now inside the **guest** (debian, RAM capped).
+
+> Known c2w cosmetic issue (#567): commands may echo twice and some escape sequences leak. Run `stty -echo` inside the guest if it bothers you. This does not affect correctness.
 
 1. Confirm you're in the guest and see the cap:
    ```
    uname -a
-   grep MemTotal /proc/meminfo      # ~256 MB
+   grep MemTotal /proc/meminfo      # ~244 MB (VM_MEMORY_SIZE_MB=256 minus kernel reserved)
    ls /mnt/host                      # host /root contents
    ```
 2. Trigger guest-internal OOM with a subshell hog (the parent shell must survive):
