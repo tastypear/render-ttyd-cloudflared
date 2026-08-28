@@ -56,6 +56,9 @@
 #ifndef SYS_mremap
 #define SYS_mremap 25
 #endif
+#ifndef SYS_munmap
+#define SYS_munmap 11
+#endif
 
 #define BRK_TABLE_SIZE 4096
 
@@ -221,7 +224,10 @@ int main(int argc, char *argv[]) {
         int nr = req.data.nr;
 
         if (nr == SYS_mmap) {
-            delta = (int64_t)req.data.args[1];
+            /* Only count anonymous mmaps; file-backed mmaps (shared libs)
+               use reclaimable page cache and don't drive OOM. */
+            if (req.data.args[3] & 0x20) /* MAP_ANONYMOUS */
+                delta = (int64_t)req.data.args[1];
         } else if (nr == SYS_brk) {
             uint64_t new_brk = req.data.args[0];
             int idx = req.pid % BRK_TABLE_SIZE;
