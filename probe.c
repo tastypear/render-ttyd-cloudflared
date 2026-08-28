@@ -23,6 +23,7 @@
 #include <linux/audit.h>
 #include <poll.h>
 #include <stddef.h>
+#include <time.h>
 
 #ifndef SECCOMP_FILTER_FLAG_NEW_LISTENER
 #define SECCOMP_FILTER_FLAG_NEW_LISTENER (1UL << 3)
@@ -41,6 +42,9 @@
 #endif
 #ifndef SYS_mmap
 #define SYS_mmap 9
+#endif
+#ifndef SYS_brk
+#define SYS_brk 12
 #endif
 
 static char outbuf[65536];
@@ -214,6 +218,233 @@ static void test_cgroup(void) {
          access("/sys/fs/cgroup/memory/memory.limit_in_bytes", F_OK) == 0 ? "yes" : "no");
 }
 
+/* ---- Test: USER_NOTIF denial (enforce a cap by returning -ENOMEM) ---- */
+static void test_denial(void) {
+    int pipefd[2]; pipe(pipefd);
+    pid_t mid = fork();
+    if (mid == 0) {
+        close(pipefd[0]);
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        struct sock_filter flt[] = {
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data, arch)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, AUDIT_ARCH_X86_64, 0, 3),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data, nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, SYS_mmap, 0, 1),
+            BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_USER_NOTIF),
+            BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+        };
+        struct sock_fprog prog = { 6, flt };
+        int ln = (int)syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER, &prog);
+        if (ln < 0) { wfmt(pipefd[1], "NEW_LISTENER fail: %s\n", strerror(errno)); _exit(2); }
+        pid_t g = fork();
+        if (g == 0) {
+            close(pipefd[1]);
+            long ret = syscall(SYS_mmap, NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+            int e = errno;
+            wfmt(2, "denial child: ret=%ld errno=%d\n", ret, e);
+            if (ret < 0 && e == ENOMEM) _exit(0);
+            _exit(1);
+        }
+        struct seccomp_notif req; memset(&req, 0, sizeof(req));
+        ioctl(ln, SECCOMP_IOCTL_NOTIF_RECV, &req);
+        wfmt(pipefd[1], "denying mmap pid=%d nr=%d\n", req.pid, req.data.nr);
+        struct seccomp_notif_resp resp; memset(&resp, 0, sizeof(resp));
+        resp.id = req.id; resp.error = 0; resp.val = -ENOMEM;  /* raw return value */
+        int r = ioctl(ln, SECCOMP_IOCTL_NOTIF_SEND, &resp);
+        wfmt(pipefd[1], "SEND(deny) ret=%d errno=%d\n", r, errno);
+        int st; waitpid(g, &st, 0);
+        wfmt(pipefd[1], "RESULT: %s\n",
+             WIFEXITED(st) && WEXITSTATUS(st)==0 ? "DENIAL_OK - child got ENOMEM" : "DENIAL_FAIL");
+        close(pipefd[1]); _exit(0);
+    }
+    close(pipefd[1]); waitpid(mid, NULL, 0);
+    char tmp[4096]; ssize_t tot=0, n;
+    while ((n=read(pipefd[0], tmp+tot, sizeof(tmp)-1-tot))>0) tot+=n;
+    if (tot>0) { tmp[tot]=0; OUTF("  %s", tmp); } else OUTF("  (no output)\n");
+    close(pipefd[0]);
+}
+
+/* ---- Test: USER_NOTIF latency (1000 mmap cycles with/without filter) ---- */
+static void test_latency(void) {
+    /* baseline: no filter */
+    int bp[2]; pipe(bp);
+    pid_t b = fork();
+    if (b==0) { close(bp[0]);
+        struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);
+        for (int i=0;i<1000;i++) { void *p=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0); if(p!=MAP_FAILED) munmap(p,4096); }
+        clock_gettime(CLOCK_MONOTONIC,&t1);
+        long ms=(t1.tv_sec-t0.tv_sec)*1000+(t1.tv_nsec-t0.tv_nsec)/1000000;
+        wfmt(bp[1], "baseline: %ld ms / 1000 mmap+munmap\n", ms);
+        close(bp[1]); _exit(0);
+    }
+    close(bp[1]); waitpid(b,NULL,0);
+    char bb[256]; ssize_t bn=read(bp[0],bb,sizeof(bb)-1); if(bn>0) bb[bn]=0; else bb[0]=0; close(bp[0]);
+    OUTF("  %s", bb);
+
+    /* with USER_NOTIF filter */
+    int mp[2], gp[2]; pipe(mp); pipe(gp);
+    pid_t mid=fork();
+    if (mid==0) {
+        close(mp[0]);
+        prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0);
+        struct sock_filter flt[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data,arch)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, AUDIT_ARCH_X86_64, 0, 3),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, SYS_mmap, 0, 1),
+            BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_USER_NOTIF),
+            BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+        };
+        struct sock_fprog prog={6,flt};
+        int ln=(int)syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,SECCOMP_FILTER_FLAG_NEW_LISTENER,&prog);
+        if(ln<0){ wfmt(mp[1],"NEW_LISTENER fail\n"); close(gp[0]); close(mp[1]); _exit(2); }
+        pid_t g=fork();
+        if(g==0){
+            close(mp[1]); close(gp[0]);
+            struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);
+            for(int i=0;i<1000;i++){ void *p=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0); if(p!=MAP_FAILED) munmap(p,4096); }
+            clock_gettime(CLOCK_MONOTONIC,&t1);
+            long ms=(t1.tv_sec-t0.tv_sec)*1000+(t1.tv_nsec-t0.tv_nsec)/1000000;
+            wfmt(gp[1],"with_filter: %ld ms / 1000 mmap+munmap\n",ms);
+            close(gp[1]); _exit(0);
+        }
+        close(gp[1]); /* mid doesn't write to gp; grandchild inherited it */
+        /* supervisor: handle notifications until grandchild exits */
+        int count=0;
+        for(;;){
+            int st; if(waitpid(g,&st,WNOHANG)>0) break;
+            struct pollfd pfd={.fd=ln,.events=POLLIN};
+            if(poll(&pfd,1,50)<=0) continue;
+            struct seccomp_notif req; memset(&req,0,sizeof(req));
+            if(ioctl(ln,SECCOMP_IOCTL_NOTIF_RECV,&req)<0) break;
+            struct seccomp_notif_resp resp; memset(&resp,0,sizeof(resp));
+            resp.id=req.id; resp.flags=SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+            ioctl(ln,SECCOMP_IOCTL_NOTIF_SEND,&resp); count++;
+        }
+        waitpid(g,NULL,0);
+        char tb[256]; ssize_t tn=read(gp[0],tb,sizeof(tb)-1); if(tn>0) tb[tn]=0; else tb[0]=0;
+        wfmt(mp[1],"%snotifications handled: %d\n",tb,count);
+        close(gp[0]); close(mp[1]); _exit(0);
+    }
+    close(mp[1]); close(gp[0]); close(gp[1]); waitpid(mid,NULL,0);
+    char tmp[4096]; ssize_t tot=0,n;
+    while((n=read(mp[0],tmp+tot,sizeof(tmp)-1-tot))>0) tot+=n;
+    if(tot>0){tmp[tot]=0; OUTF("  %s",tmp);} else OUTF("  (no output)\n");
+    close(mp[0]);
+}
+
+/* ---- Test: brk interception via USER_NOTIF ---- */
+static void test_brk_notif(void) {
+    int pipefd[2]; pipe(pipefd);
+    pid_t mid=fork();
+    if(mid==0){
+        close(pipefd[0]);
+        prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0);
+        struct sock_filter flt[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data,arch)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, AUDIT_ARCH_X86_64, 0, 3),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, SYS_brk, 0, 1),
+            BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_USER_NOTIF),
+            BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+        };
+        struct sock_fprog prog={6,flt};
+        int ln=(int)syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,SECCOMP_FILTER_FLAG_NEW_LISTENER,&prog);
+        if(ln<0){ wfmt(pipefd[1],"NEW_LISTENER fail: %s\n",strerror(errno)); _exit(2); }
+        pid_t g=fork();
+        if(g==0){
+            close(pipefd[1]);
+            unsigned long cur=(unsigned long)syscall(SYS_brk,0);
+            wfmt(2,"brk child: cur=%lu\n",cur);
+            unsigned long nw=(unsigned long)syscall(SYS_brk,cur+4096);
+            wfmt(2,"brk child: nw=%lu expected>=%lu\n",nw,cur+4096);
+            if(nw>=cur+4096) _exit(0);
+            _exit(1);
+        }
+        int count=0, all_brk=1, child_status=0, got_status=0;
+        for(;;){
+            int st; if(waitpid(g,&st,WNOHANG)>0) { child_status=st; got_status=1; break; }
+            struct pollfd pfd={.fd=ln,.events=POLLIN};
+            if(poll(&pfd,1,50)<=0) continue;
+            struct seccomp_notif req; memset(&req,0,sizeof(req));
+            if(ioctl(ln,SECCOMP_IOCTL_NOTIF_RECV,&req)<0) break;
+            if(req.data.nr!=SYS_brk) all_brk=0;
+            struct seccomp_notif_resp resp; memset(&resp,0,sizeof(resp));
+            resp.id=req.id; resp.flags=SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+            ioctl(ln,SECCOMP_IOCTL_NOTIF_SEND,&resp); count++;
+        }
+        if(!got_status) { int st; waitpid(g,&st,0); child_status=st; }
+        wfmt(pipefd[1],"notifications: %d, all_brk=%d, child_exit=%d, termsig=%d\n",
+             count,all_brk,WIFEXITED(child_status)?WEXITSTATUS(child_status):-1,WIFSIGNALED(child_status)?WTERMSIG(child_status):-1);
+        wfmt(pipefd[1],"RESULT: %s\n",
+             WIFEXITED(child_status)&&WEXITSTATUS(child_status)==0&&all_brk ? "BRK_OK - brk intercepted and CONTINUE worked" : "BRK_FAIL");
+        close(pipefd[1]); _exit(0);
+    }
+    close(pipefd[1]); waitpid(mid,NULL,0);
+    char tmp[4096]; ssize_t tot=0,n;
+    while((n=read(pipefd[0],tmp+tot,sizeof(tmp)-1-tot))>0) tot+=n;
+    if(tot>0){tmp[tot]=0; OUTF("  %s",tmp);} else OUTF("  (no output)\n");
+    close(pipefd[0]);
+}
+
+/* ---- Test: multi-process notifications on shared listener ---- */
+static void test_multiproc(void) {
+    int pipefd[2]; pipe(pipefd);
+    pid_t mid=fork();
+    if(mid==0){
+        close(pipefd[0]);
+        prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0);
+        struct sock_filter flt[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data,arch)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, AUDIT_ARCH_X86_64, 0, 3),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, SYS_mmap, 0, 1),
+            BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_USER_NOTIF),
+            BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+        };
+        struct sock_fprog prog={6,flt};
+        int ln=(int)syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,SECCOMP_FILTER_FLAG_NEW_LISTENER,&prog);
+        if(ln<0){ wfmt(pipefd[1],"NEW_LISTENER fail\n"); _exit(2); }
+        pid_t kids[3]; int k;
+        for(k=0;k<3;k++){
+            kids[k]=fork();
+            if(kids[k]==0){
+                close(pipefd[1]);
+                void *p=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+                if(p!=MAP_FAILED){ *(volatile char*)p=1; munmap(p,4096); _exit(0); }
+                _exit(1);
+            }
+        }
+        int count=0, pids[3]={0,0,0}, unique=1;
+        for(;;){
+            int all_done=1;
+            for(k=0;k<3;k++){ int st; if(waitpid(kids[k],&st,WNOHANG)==0) all_done=0; }
+            if(all_done) break;
+            struct pollfd pfd={.fd=ln,.events=POLLIN};
+            if(poll(&pfd,1,50)<=0) continue;
+            struct seccomp_notif req; memset(&req,0,sizeof(req));
+            if(ioctl(ln,SECCOMP_IOCTL_NOTIF_RECV,&req)<0) break;
+            if(count<3) pids[count]=req.pid;
+            struct seccomp_notif_resp resp; memset(&resp,0,sizeof(resp));
+            resp.id=req.id; resp.flags=SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+            ioctl(ln,SECCOMP_IOCTL_NOTIF_SEND,&resp); count++;
+        }
+        int ok=0;
+        for(k=0;k<3;k++){ int st; waitpid(kids[k],&st,0); if(WIFEXITED(st)&&WEXITSTATUS(st)==0) ok++; }
+        for(k=1;k<3;k++) if(pids[k]==pids[0]||pids[k]==0) unique=0;
+        wfmt(pipefd[1],"notifications=%d, children_ok=%d/3, unique_pids=%d\n",count,ok,unique);
+        wfmt(pipefd[1],"pids=%d,%d,%d\n",pids[0],pids[1],pids[2]);
+        wfmt(pipefd[1],"RESULT: %s\n",
+             ok==3&&unique ? "MULTIPROC_OK - 3 children, 3 distinct pids, all succeeded" : "MULTIPROC_FAIL");
+        close(pipefd[1]); _exit(0);
+    }
+    close(pipefd[1]); waitpid(mid,NULL,0);
+    char tmp[4096]; ssize_t tot=0,n;
+    while((n=read(pipefd[0],tmp+tot,sizeof(tmp)-1-tot))>0) tot+=n;
+    if(tot>0){tmp[tot]=0; OUTF("  %s",tmp);} else OUTF("  (no output)\n");
+    close(pipefd[0]);
+}
+
 static void serve_http(int port, const char *body) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) { fprintf(stderr, "socket fail: %s\n", strerror(errno)); return; }
@@ -271,6 +502,26 @@ int main(void) {
     /* cgroup */
     OUTF("[cgroup]\n");
     test_cgroup();
+    OUTF("\n");
+
+    /* USER_NOTIF denial (enforcement) */
+    OUTF("[USER_NOTIF denial - can we ENFORCE a cap?]\n");
+    test_denial();
+    OUTF("\n");
+
+    /* USER_NOTIF latency */
+    OUTF("[USER_NOTIF latency - overhead per notification]\n");
+    test_latency();
+    OUTF("\n");
+
+    /* brk interception */
+    OUTF("[brk interception via USER_NOTIF]\n");
+    test_brk_notif();
+    OUTF("\n");
+
+    /* multi-process shared listener */
+    OUTF("[multi-process notifications on shared listener]\n");
+    test_multiproc();
     OUTF("\n=== END ===\n");
 
     /* Print to stderr so it appears in container logs */
