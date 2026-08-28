@@ -61,6 +61,38 @@
 #endif
 
 #define BRK_TABLE_SIZE 4096
+#define PID_TABLE_SIZE 4096
+
+/* ---- Per-pid anonymous memory tracking ---- */
+struct pid_entry {
+    pid_t pid;
+    int64_t anon;
+};
+static struct pid_entry pid_table[PID_TABLE_SIZE];
+
+static struct pid_entry *get_pid_entry(pid_t pid) {
+    int start = ((unsigned)pid) % PID_TABLE_SIZE;
+    for (int i = 0; i < 8; i++) {
+        int idx = (start + i) % PID_TABLE_SIZE;
+        if (pid_table[idx].pid == pid || pid_table[idx].pid == 0)
+            return &pid_table[idx];
+    }
+    return NULL;
+}
+
+/* ---- Read actual anonymous memory from /proc/meminfo ---- */
+static uint64_t read_anon_pages(void) {
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return 0;
+    char line[256];
+    uint64_t anon_kb = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "AnonPages: %llu kB", (unsigned long long *)&anon_kb) == 1)
+            break;
+    }
+    fclose(f);
+    return anon_kb * 1024;
+}
 
 /* ---- Pass a file descriptor over a Unix domain socket ---- */
 static int send_fd(int sock, int fd) {
@@ -209,6 +241,26 @@ int main(int argc, char *argv[]) {
         struct pollfd pfd = { .fd = listener, .events = POLLIN };
         int pr = poll(&pfd, 1, 1000);
         if (pr <= 0) {
+            for (int i = 0; i < PID_TABLE_SIZE; i++) {
+                if (pid_table[i].pid != 0 && pid_table[i].anon > 0) {
+                    if (kill(pid_table[i].pid, 0) < 0 && errno == ESRCH) {
+                        fprintf(stderr, "[memlimit] reap pid=%d anon=%lldMB\n",
+                                pid_table[i].pid,
+                                (long long)pid_table[i].anon / (1024 * 1024));
+                        total = total > (uint64_t)pid_table[i].anon ?
+                                total - (uint64_t)pid_table[i].anon : 0;
+                        pid_table[i].pid = 0;
+                        pid_table[i].anon = 0;
+                    }
+                }
+            }
+            uint64_t anon = read_anon_pages();
+            if (anon > 0 && anon < total) {
+                fprintf(stderr, "[memlimit] correct: total %lluMB -> %lluMB (AnonPages)\n",
+                        (unsigned long long)total / (1024 * 1024),
+                        (unsigned long long)anon / (1024 * 1024));
+                total = anon;
+            }
             time_t now = time(NULL);
             if (now != last_log) {
                 last_log = now;
@@ -245,9 +297,16 @@ int main(int argc, char *argv[]) {
                 } else {
                     delta = (int64_t)(new_brk - old_brk);
                     if (delta > (1024LL * 1024 * 1024) || delta < -(1024LL * 1024 * 1024)) {
-                        /* exec replaced the address space; reset baseline. */
+                        /* exec replaced the address space; reset baseline
+                           and per-pid anon (old mappings destroyed). */
                         brk_table[idx] = new_brk;
                         delta = 0;
+                        struct pid_entry *pe = get_pid_entry(req.pid);
+                        if (pe && pe->pid == req.pid && pe->anon > 0) {
+                            total = total > (uint64_t)pe->anon ?
+                                    total - (uint64_t)pe->anon : 0;
+                            pe->anon = 0;
+                        }
                     } else {
                         brk_table[idx] = new_brk;
                     }
@@ -273,6 +332,15 @@ int main(int argc, char *argv[]) {
             total = total > abs_delta ? total - abs_delta : 0;
         }
 
+        if (!deny && delta != 0) {
+            struct pid_entry *pe = get_pid_entry(req.pid);
+            if (pe) {
+                if (pe->pid == 0) pe->pid = req.pid;
+                pe->anon += delta;
+                if (pe->anon < 0) pe->anon = 0;
+            }
+        }
+
         struct seccomp_notif_resp resp;
         memset(&resp, 0, sizeof(resp));
         resp.id = req.id;
@@ -284,6 +352,28 @@ int main(int argc, char *argv[]) {
         ioctl(listener, SECCOMP_IOCTL_NOTIF_SEND, &resp);
 
         if (notif_count % 500 == 0) {
+            /* Clean up dead pids: subtract their anon from global total. */
+            for (int i = 0; i < PID_TABLE_SIZE; i++) {
+                if (pid_table[i].pid != 0 && pid_table[i].anon > 0) {
+                    if (kill(pid_table[i].pid, 0) < 0 && errno == ESRCH) {
+                        fprintf(stderr, "[memlimit] reap pid=%d anon=%lldMB\n",
+                                pid_table[i].pid,
+                                (long long)pid_table[i].anon / (1024 * 1024));
+                        total = total > (uint64_t)pid_table[i].anon ?
+                                total - (uint64_t)pid_table[i].anon : 0;
+                        pid_table[i].pid = 0;
+                        pid_table[i].anon = 0;
+                    }
+                }
+            }
+            /* Secondary correction from /proc/meminfo (works if container-scoped). */
+            uint64_t anon = read_anon_pages();
+            if (anon > 0 && anon < total) {
+                fprintf(stderr, "[memlimit] correct: total %lluMB -> %lluMB (AnonPages)\n",
+                        (unsigned long long)total / (1024 * 1024),
+                        (unsigned long long)anon / (1024 * 1024));
+                total = anon;
+            }
             fprintf(stderr, "[memlimit] total=%lluMB notifs=%d denies=%d\n",
                     (unsigned long long)total / (1024 * 1024), notif_count, deny_count);
         }

@@ -16,6 +16,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app
 
+RUN echo 'APT::Cache-Start 100000000;' > /etc/apt/apt.conf.d/99cache
+
 RUN wget -qO /usr/local/bin/cloudflared \
         "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64" \
     && chmod +x /usr/local/bin/cloudflared
