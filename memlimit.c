@@ -96,14 +96,15 @@ static int recv_fd(int sock) {
     return -1;
 }
 
-/* ---- BPF filter: USER_NOTIF on mmap/brk/mremap, allow everything else ---- */
+/* ---- BPF filter: USER_NOTIF on mmap/brk/mremap/munmap, allow rest ---- */
 static struct sock_filter filter[] = {
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, 5),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, 6),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_mmap,   3, 0),
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_brk,    2, 0),
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_mremap, 1, 0),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_mmap,   4, 0),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_brk,    3, 0),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_mremap, 2, 0),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_munmap, 1, 0),
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
 };
@@ -113,6 +114,7 @@ int main(int argc, char *argv[]) {
     uint64_t soft_cap = 350ULL * 1024 * 1024;
     const char *shim_path = "/app/memshim.so";
     int cmd_start = -1;
+    int no_shim = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--hard=", 7) == 0)
@@ -121,6 +123,8 @@ int main(int argc, char *argv[]) {
             soft_cap = (uint64_t)atol(argv[i] + 7) * 1024 * 1024;
         else if (strncmp(argv[i], "--shim=", 7) == 0)
             shim_path = argv[i] + 7;
+        else if (strcmp(argv[i], "--no-shim") == 0)
+            no_shim = 1;
         else if (strcmp(argv[i], "--") == 0) { cmd_start = i + 1; break; }
     }
     if (cmd_start < 0 || cmd_start >= argc) {
@@ -160,10 +164,12 @@ int main(int argc, char *argv[]) {
         close(sv[1]);
         close(listener);
 
-        setenv("LD_PRELOAD", shim_path, 1);
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%llu", (unsigned long long)soft_cap);
-        setenv("MEMLIMIT_SOFT_CAP", buf, 1);
+        if (!no_shim) {
+            setenv("LD_PRELOAD", shim_path, 1);
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%llu", (unsigned long long)soft_cap);
+            setenv("MEMLIMIT_SOFT_CAP", buf, 1);
+        }
 
         execvp(argv[cmd_start], &argv[cmd_start]);
         fprintf(stderr, "[memlimit] exec %s: %s\n", argv[cmd_start], strerror(errno));
@@ -249,6 +255,8 @@ int main(int argc, char *argv[]) {
             }
         } else if (nr == SYS_mremap) {
             delta = (int64_t)(req.data.args[2] - req.data.args[1]);
+        } else if (nr == SYS_munmap) {
+            delta = -(int64_t)req.data.args[1];
         }
 
         if (delta > 0 && total + (uint64_t)delta > hard_cap) {

@@ -30,4 +30,4 @@ COPY start-actual.sh /app/start-actual.sh
 RUN chmod +x /app/start-actual.sh
 
 EXPOSE 7681
-CMD ["/app/memlimit", "--hard=450", "--soft=350", "--", "/bin/bash", "/app/start-actual.sh"]
+CMD ["/app/memlimit", "--hard=450", "--no-shim", "--", "/bin/bash", "/app/start-actual.sh"]
